@@ -34,7 +34,9 @@ class FileManager:
         self.projects_dir = self.root_dir / "projects"
         self.tmp_dir = self.root_dir / "tmp"
         self.security = security
-        self.max_file_size_bytes = max(1, int(max_file_size_mb)) * 1024 * 1024
+        if int(max_file_size_mb) <= 0:
+            raise ValueError("max_file_size_mb must be a positive number")
+        self.max_file_size_bytes = int(max_file_size_mb) * 1024 * 1024
         ensure_dir(str(self.projects_dir))
         ensure_dir(str(self.tmp_dir))
 

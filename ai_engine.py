@@ -34,7 +34,7 @@ class AIResponse:
 
 
 FILE_BLOCK_RE = re.compile(
-    r"FILE:\s*(?P<path>[^\r\n]+)\r?\n```(?P<lang>[^\n`]*)\r?\n(?P<content>[\s\S]*?)\r?\n```",
+    r"FILE:\s*(?P<path>[^\r\n]+)\r?\n```(?P<lang>[\w.+-]*)\r?\n(?P<content>[\s\S]*?)\r?\n```",
     re.MULTILINE,
 )
 
@@ -199,7 +199,10 @@ class AIEngine:
                             try:
                                 chunk = json.loads(data_text)
                             except json.JSONDecodeError:
-                                self.logger.warning("Skipping malformed stream JSON chunk")
+                                self.logger.warning(
+                                    "Skipping malformed stream JSON chunk: %s",
+                                    data_text[:160].replace("\n", "\\n"),
+                                )
                                 continue
 
                             if not isinstance(chunk, dict):

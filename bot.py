@@ -38,6 +38,8 @@ from utils import (
 )
 
 SESSION_PENDING_KEY = "pending_generation"
+PLANNING_EDIT_THRESHOLD = 350
+GENERATION_EDIT_THRESHOLD = 500
 
 
 class BotServices:
@@ -57,10 +59,8 @@ class BotServices:
         self.docker = DockerRunner(self.config, self.security)
 
 
-
 def services_from_context(context: ContextTypes.DEFAULT_TYPE) -> BotServices:
     return context.application.bot_data["services"]
-
 
 
 def action_keyboard(include_continue: bool = True) -> InlineKeyboardMarkup:
@@ -253,9 +253,12 @@ async def _run_planning_mode(
     try:
         async for chunk in services.ai.stream(uid, planning_prompt):
             plan_text += chunk
-            if len(plan_text) - last_edit >= 350:
-                last_edit = len(plan_text)
-                await progress.edit_text(clamp_text("🧠 Planning...\n\n" + plan_text[-2000:]))
+            plan_len = len(plan_text)
+            if plan_len - last_edit >= PLANNING_EDIT_THRESHOLD:
+                last_edit = plan_len
+                await progress.edit_text(
+                    clamp_text(f"🧠 Planning... ({plan_len} chars)\n\n" + plan_text[-2000:])
+                )
 
         await _set_pending_generation(services, uid, action=action, prompt=user_prompt, plan=plan_text)
         await progress.edit_text(
@@ -307,9 +310,12 @@ async def _run_generation_from_pending(update: Update, context: ContextTypes.DEF
     try:
         async for chunk in services.ai.stream(uid, generation_prompt):
             content += chunk
-            if len(content) - last_edit >= 500:
-                last_edit = len(content)
-                await progress.edit_text(clamp_text("⚙️ Generating files...\n\nStreaming response received."))
+            content_len = len(content)
+            if content_len - last_edit >= GENERATION_EDIT_THRESHOLD:
+                last_edit = content_len
+                await progress.edit_text(
+                    clamp_text(f"⚙️ Generating files... ({content_len} chars received)\n\nStreaming in progress.")
+                )
 
         blocks = services.ai.extract_file_blocks(content)
         if not blocks:
@@ -441,7 +447,6 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 async def post_init(application: Application) -> None:
     services: BotServices = application.bot_data["services"]
     services.logger.info("Bot initialized successfully")
-
 
 
 def main() -> None:
