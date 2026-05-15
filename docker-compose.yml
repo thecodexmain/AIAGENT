@@ -1,0 +1,17 @@
+services:
+  aiagent:
+    build: .
+    container_name: aiagent
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./projects:/app/projects
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'print(\"ok\")'"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

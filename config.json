@@ -1,0 +1,15 @@
+{
+  "admin_ids": [],
+  "default_model": "gpt-5.5",
+  "default_base_url": "https://api.freemodel.dev/v1",
+  "maintenance_mode": false,
+  "limits": {
+    "requests_per_minute": 20,
+    "cooldown_seconds": 2,
+    "max_prompt_chars": 12000,
+    "max_file_size_mb": 5,
+    "docker_timeout_seconds": 90,
+    "docker_memory_limit": "512m",
+    "docker_cpu_limit": "1.0"
+  }
+}
