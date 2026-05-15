@@ -60,6 +60,21 @@ def safe_markdown(text: str) -> str:
     return "".join(output)
 
 
+def should_trigger_continue(text: str) -> bool:
+    normalized = (text or "").strip().lower()
+    return normalized in {"continue", "/continue"}
+
+
+def summarize_saved_files(files: list[str], max_items: int = 20) -> str:
+    if not files:
+        return "(no files saved)"
+    head = files[:max_items]
+    lines = [f"- {name}" for name in head]
+    if len(files) > max_items:
+        lines.append(f"- ... and {len(files) - max_items} more")
+    return "\n".join(lines)
+
+
 @dataclass
 class SystemStats:
     cpu_percent: float

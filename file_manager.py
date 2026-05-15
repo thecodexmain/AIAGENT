@@ -1,27 +1,40 @@
-"""Project file management with safe path handling and ZIP export."""
+"""Project file management with safe path handling, size limits, and ZIP export."""
 
 from __future__ import annotations
 
 import os
 import shutil
 import zipfile
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 import aiofiles
 
-from security import SecurityManager
+from security import SecurityError, SecurityManager
 from utils import ensure_dir
+
+
+@dataclass
+class SavedFile:
+    path: str
+    size_bytes: int
+    language: str = ""
 
 
 class FileManager:
     """Manages per-user project files in a secure root directory."""
 
-    def __init__(self, root_dir: str, security: SecurityManager) -> None:
+    _MAX_RELATIVE_PATH = 260
+    _BLOCKED_PARTS = {".versions", ".git", "__pycache__"}
+    _BLOCKED_FILENAMES = {".env", "id_rsa", "authorized_keys"}
+
+    def __init__(self, root_dir: str, security: SecurityManager, max_file_size_mb: int = 5) -> None:
         self.root_dir = Path(root_dir)
         self.projects_dir = self.root_dir / "projects"
         self.tmp_dir = self.root_dir / "tmp"
         self.security = security
+        self.max_file_size_bytes = max(1, int(max_file_size_mb)) * 1024 * 1024
         ensure_dir(str(self.projects_dir))
         ensure_dir(str(self.tmp_dir))
 
@@ -32,9 +45,47 @@ class FileManager:
         ensure_dir(str(project_dir / ".versions"))
         return project_dir
 
+    def _validate_relative_path(self, relative_path: str) -> str:
+        candidate = (relative_path or "").strip().replace("\\", "/")
+        if not candidate:
+            raise SecurityError("Filename cannot be empty")
+        if len(candidate) > self._MAX_RELATIVE_PATH:
+            raise SecurityError("Filename is too long")
+        if "\x00" in candidate:
+            raise SecurityError("Filename contains null bytes")
+        if candidate.startswith("/"):
+            raise SecurityError("Absolute paths are not allowed")
+
+        normalized = os.path.normpath(candidate).replace("\\", "/")
+        if normalized in {".", ".."} or normalized.startswith("../"):
+            raise SecurityError("Path traversal attempt blocked")
+
+        parts = [part for part in normalized.split("/") if part]
+        if not parts:
+            raise SecurityError("Invalid filename")
+
+        for part in parts:
+            if part in {".", ".."}:
+                raise SecurityError("Path traversal attempt blocked")
+            if part in self._BLOCKED_PARTS:
+                raise SecurityError(f"Writing to protected directory '{part}' is blocked")
+
+        filename = parts[-1]
+        if filename.lower() in self._BLOCKED_FILENAMES:
+            raise SecurityError(f"Writing to protected file '{filename}' is blocked")
+
+        return normalized
+
     async def write_file(self, user_id: int, relative_path: str, content: str, project_name: str = "default") -> str:
         project_dir = self.user_project_dir(user_id, project_name)
-        target = self.security.secure_join(str(project_dir), relative_path)
+        safe_relative = self._validate_relative_path(relative_path)
+        content_bytes = content.encode("utf-8")
+        if len(content_bytes) > self.max_file_size_bytes:
+            raise SecurityError(
+                f"File '{safe_relative}' exceeds size limit of {self.max_file_size_bytes // (1024 * 1024)} MB"
+            )
+
+        target = self.security.secure_join(str(project_dir), safe_relative)
         ensure_dir(os.path.dirname(target))
 
         if os.path.exists(target):
@@ -42,11 +93,24 @@ class FileManager:
 
         async with aiofiles.open(target, "w", encoding="utf-8") as handle:
             await handle.write(content)
-        return target
+        return safe_relative
+
+    async def write_files(
+        self,
+        user_id: int,
+        files: list[tuple[str, str, str]],
+        project_name: str = "default",
+    ) -> list[SavedFile]:
+        saved: list[SavedFile] = []
+        for relative_path, content, language in files:
+            rel = await self.write_file(user_id, relative_path, content, project_name=project_name)
+            saved.append(SavedFile(path=rel, size_bytes=len(content.encode("utf-8")), language=language))
+        return saved
 
     async def read_file(self, user_id: int, relative_path: str, project_name: str = "default") -> str:
         project_dir = self.user_project_dir(user_id, project_name)
-        target = self.security.secure_join(str(project_dir), relative_path)
+        safe_relative = self._validate_relative_path(relative_path)
+        target = self.security.secure_join(str(project_dir), safe_relative)
         async with aiofiles.open(target, "r", encoding="utf-8") as handle:
             return await handle.read()
 
@@ -57,14 +121,16 @@ class FileManager:
             for name in names:
                 full_path = os.path.join(root, name)
                 rel = os.path.relpath(full_path, project_dir)
-                if rel.startswith(".versions"):
+                normalized = rel.replace("\\", "/")
+                if normalized.startswith(".versions"):
                     continue
-                files.append(rel)
+                files.append(normalized)
         return sorted(files)
 
     def delete_file(self, user_id: int, relative_path: str, project_name: str = "default") -> bool:
         project_dir = self.user_project_dir(user_id, project_name)
-        target = self.security.secure_join(str(project_dir), relative_path)
+        safe_relative = self._validate_relative_path(relative_path)
+        target = self.security.secure_join(str(project_dir), safe_relative)
         if os.path.isfile(target):
             os.remove(target)
             return True
@@ -85,16 +151,18 @@ class FileManager:
 
     def export_zip(self, user_id: int, project_name: str = "default") -> str:
         project_dir = self.user_project_dir(user_id, project_name)
-        zip_path = self.tmp_dir / f"project_{user_id}_{project_name}.zip"
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+        zip_path = self.tmp_dir / f"project_{user_id}_{project_name}_{timestamp}.zip"
 
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             for root, _, files in os.walk(project_dir):
                 for file in files:
                     full = Path(root) / file
                     rel = full.relative_to(project_dir)
-                    if str(rel).startswith(".versions"):
+                    rel_str = str(rel).replace("\\", "/")
+                    if rel_str.startswith(".versions"):
                         continue
-                    archive.write(full, arcname=str(rel))
+                    archive.write(full, arcname=rel_str)
         return str(zip_path)
 
     async def _snapshot(self, filepath: str, project_dir: Path) -> None:
