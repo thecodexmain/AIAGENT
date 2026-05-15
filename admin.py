@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from telegram import Update
@@ -113,7 +112,7 @@ class AdminHandlers:
         delivered = 0
         for user_id in users:
             try:
-                await context.bot.send_message(chat_id=user_id, text=f"�� Admin Broadcast:\n{text}")
+                await context.bot.send_message(chat_id=user_id, text=f"📢 Admin Broadcast:\n{text}")
                 delivered += 1
             except Exception:
                 continue
@@ -197,14 +196,16 @@ class AdminHandlers:
     async def restart(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._guard(update):
             return
-        await update.message.reply_text("♻ Restarting process...")
-        os._exit(0)
+        await update.message.reply_text(
+            "♻ Restart requested. Stopping gracefully; your process manager should bring it back up."
+        )
+        context.application.stop_running()
 
     async def shutdown(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._guard(update):
             return
-        await update.message.reply_text("🛑 Shutting down process...")
-        os._exit(0)
+        await update.message.reply_text("🛑 Shutdown requested. Stopping gracefully.")
+        context.application.stop_running()
 
 
 

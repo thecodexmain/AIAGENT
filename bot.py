@@ -151,7 +151,8 @@ async def zip_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     uid = int(update.effective_user.id)
     zip_path = services.files.export_zip(uid)
-    await update.message.reply_document(document=open(zip_path, "rb"), filename=f"project_{uid}.zip")
+    with open(zip_path, "rb") as archive:
+        await update.message.reply_document(document=archive, filename=f"project_{uid}.zip")
 
 
 async def _run_ai_task(update: Update, context: ContextTypes.DEFAULT_TYPE, task_prompt: str) -> None:

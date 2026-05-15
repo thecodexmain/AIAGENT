@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import zipfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import aiofiles
@@ -99,7 +99,7 @@ class FileManager:
 
     async def _snapshot(self, filepath: str, project_dir: Path) -> None:
         rel = os.path.relpath(filepath, str(project_dir))
-        timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
         snapshot_name = rel.replace("/", "__") + f".{timestamp}.bak"
         snapshot_path = project_dir / ".versions" / snapshot_name
         ensure_dir(str(snapshot_path.parent))
