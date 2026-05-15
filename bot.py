@@ -62,8 +62,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         ]
     )
     await update.message.reply_text(
-        "👋 Welcome to AIAGENT\!\nUse /help to see all commands\.",
-        parse_mode=ParseMode.MARKDOWN_V2,
+        "👋 Welcome to AIAGENT!\nUse /help to see all commands.",
         reply_markup=keyboard,
     )
 
@@ -74,12 +73,12 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     message = (
-        "*User Commands*\n"
+        "User Commands:\n"
         "/start, /help, /build, /fix, /continue, /run, /zip, /files,\n"
         "/delete, /history, /reset, /status\n\n"
-        "Use /build <prompt> to generate code\."
+        "Use /build <prompt> to generate code."
     )
-    await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN_V2)
+    await update.message.reply_text(message)
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
