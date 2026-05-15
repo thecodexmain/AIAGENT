@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
 from pathlib import Path
+from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 from admin import AdminHandlers, register_admin_handlers
 from ai_engine import AIEngine, AIEngineError
@@ -25,7 +32,14 @@ from utils import (
     get_system_stats,
     safe_markdown,
     setup_logging,
+    should_trigger_continue,
+    summarize_saved_files,
+    utc_now_iso,
 )
+
+SESSION_PENDING_KEY = "pending_generation"
+PLANNING_EDIT_THRESHOLD = 350
+GENERATION_EDIT_THRESHOLD = 500
 
 
 class BotServices:
@@ -39,7 +53,7 @@ class BotServices:
         self.security = SecurityManager(
             os.getenv("APP_ENCRYPTION_SECRET") or os.getenv("TELEGRAM_BOT_TOKEN") or "fallback-seed"
         )
-        self.files = FileManager(root_dir, self.security)
+        self.files = FileManager(root_dir, self.security, max_file_size_mb=self.config.config.limits.max_file_size_mb)
         self.middleware = MiddlewareService(root_dir, self.config, self.memory)
         self.ai = AIEngine(self.config, self.memory)
         self.docker = DockerRunner(self.config, self.security)
@@ -47,6 +61,52 @@ class BotServices:
 
 def services_from_context(context: ContextTypes.DEFAULT_TYPE) -> BotServices:
     return context.application.bot_data["services"]
+
+
+def action_keyboard(include_continue: bool = True) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if include_continue:
+        rows.append([InlineKeyboardButton("▶ CONTINUE", callback_data="cmd:continue")])
+    rows.append(
+        [
+            InlineKeyboardButton("📦 DOWNLOAD ZIP", callback_data="cmd:zip"),
+            InlineKeyboardButton("📁 SHOW FILES", callback_data="cmd:files"),
+        ]
+    )
+    return InlineKeyboardMarkup(rows)
+
+
+async def _load_session(services: BotServices, user_id: int) -> dict[str, Any]:
+    return await services.memory.load_session(user_id)
+
+
+async def _save_session(services: BotServices, user_id: int, session: dict[str, Any]) -> None:
+    await services.memory.save_session(user_id, session)
+
+
+async def _set_pending_generation(services: BotServices, user_id: int, action: str, prompt: str, plan: str) -> None:
+    session = await _load_session(services, user_id)
+    session[SESSION_PENDING_KEY] = {
+        "action": action,
+        "prompt": prompt,
+        "plan": plan,
+        "created_at": utc_now_iso(),
+    }
+    await _save_session(services, user_id, session)
+
+
+async def _clear_pending_generation(services: BotServices, user_id: int) -> None:
+    session = await _load_session(services, user_id)
+    session.pop(SESSION_PENDING_KEY, None)
+    await _save_session(services, user_id, session)
+
+
+async def _get_pending_generation(services: BotServices, user_id: int) -> dict[str, Any] | None:
+    session = await _load_session(services, user_id)
+    value = session.get(SESSION_PENDING_KEY)
+    if isinstance(value, dict):
+        return value
+    return None
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -57,12 +117,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     keyboard = InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("🛠 Build", callback_data="cmd:build")],
-            [InlineKeyboardButton("🐞 Fix", callback_data="cmd:fix"), InlineKeyboardButton("▶ Continue", callback_data="cmd:continue")],
-            [InlineKeyboardButton("📁 Files", callback_data="cmd:files"), InlineKeyboardButton("📦 Zip", callback_data="cmd:zip")],
+            [InlineKeyboardButton("🐞 Fix", callback_data="cmd:fix"), InlineKeyboardButton("▶ CONTINUE", callback_data="cmd:continue")],
+            [InlineKeyboardButton("📁 SHOW FILES", callback_data="cmd:files"), InlineKeyboardButton("📦 DOWNLOAD ZIP", callback_data="cmd:zip")],
         ]
     )
-    await update.message.reply_text(
-        "👋 Welcome to AIAGENT!\nUse /help to see all commands.",
+    await update.effective_message.reply_text(
+        "👋 Welcome to AIAGENT!\nUse /build <prompt> to start planning, then send CONTINUE.",
         reply_markup=keyboard,
     )
 
@@ -76,9 +136,12 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "User Commands:\n"
         "/start, /help, /build, /fix, /continue, /run, /zip, /files,\n"
         "/delete, /history, /reset, /status\n\n"
-        "Use /build <prompt> to generate code."
+        "Workflow:\n"
+        "1) /build <task> or /fix <task> generates a project plan only\n"
+        "2) Send CONTINUE or /continue to generate and save files\n"
+        "3) Bot auto-exports ZIP and can resend with /zip"
     )
-    await update.message.reply_text(message)
+    await update.effective_message.reply_text(message)
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -94,7 +157,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         api_calls=int(persistent.get("api_calls", 0)),
         error_count=int(persistent.get("errors", 0)),
     )
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+    await update.effective_message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 
 async def history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -104,10 +167,10 @@ async def history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = int(update.effective_user.id)
     recent = await services.memory.get_recent_history(uid, limit=12)
     if not recent:
-        await update.message.reply_text("No history yet.")
+        await update.effective_message.reply_text("No history yet.")
         return
     lines = [f"{item['role']}: {item['content'][:140]}" for item in recent]
-    await update.message.reply_text(clamp_text("\n".join(lines)))
+    await update.effective_message.reply_text(clamp_text("\n".join(lines)))
 
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -116,7 +179,7 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     uid = int(update.effective_user.id)
     await services.memory.reset_user(uid)
-    await update.message.reply_text("✅ Your session and history were reset.")
+    await update.effective_message.reply_text("✅ Your session and history were reset.")
 
 
 async def files_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -127,9 +190,9 @@ async def files_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     project_name = "default"
     files = services.files.list_files(uid, project_name)
     if not files:
-        await update.message.reply_text("No files in your project yet.")
+        await update.effective_message.reply_text("No files in your project yet.")
         return
-    await update.message.reply_text(clamp_text("📁 Files:\n" + "\n".join(f"- {f}" for f in files)))
+    await update.effective_message.reply_text(clamp_text("📁 Files:\n" + "\n".join(f"- {f}" for f in files)))
 
 
 async def delete_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -137,12 +200,12 @@ async def delete_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not await services.middleware.ensure_user_allowed(update, context):
         return
     if not context.args:
-        await update.message.reply_text("Usage: /delete RELATIVE_FILE_PATH")
+        await update.effective_message.reply_text("Usage: /delete RELATIVE_FILE_PATH")
         return
     uid = int(update.effective_user.id)
     target = " ".join(context.args)
     ok = services.files.delete_file(uid, target)
-    await update.message.reply_text("🗑 Deleted." if ok else "❌ File not found.")
+    await update.effective_message.reply_text("🗑 Deleted." if ok else "❌ File not found.")
 
 
 async def zip_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -152,68 +215,169 @@ async def zip_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = int(update.effective_user.id)
     zip_path = services.files.export_zip(uid)
     with open(zip_path, "rb") as archive:
-        await update.message.reply_document(document=archive, filename=f"project_{uid}.zip")
+        await update.effective_message.reply_document(
+            document=archive,
+            filename=Path(zip_path).name,
+            caption="📦 Project ZIP",
+            reply_markup=action_keyboard(include_continue=False),
+        )
 
 
-async def _run_ai_task(update: Update, context: ContextTypes.DEFAULT_TYPE, task_prompt: str) -> None:
+async def _run_planning_mode(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    action: str,
+    user_prompt: str,
+) -> None:
     services = services_from_context(context)
     uid = int(update.effective_user.id)
 
-    progress = await update.message.reply_text("🚀 Starting... " + build_progress_bar(5))
+    planning_prompt = (
+        "Create a project architecture plan only. Do NOT generate any code and do NOT output any FILE blocks. "
+        "The response must include:\n"
+        "1) Architecture overview\n"
+        "2) Folder structure tree\n"
+        "3) Full file paths to be created\n"
+        "4) Purpose of every file\n"
+        "5) Execution flow step-by-step\n"
+        "6) Dependencies and why they are needed\n"
+        "End with: WAITING FOR CONTINUE\n\n"
+        f"Task type: {action}\n"
+        f"User request: {user_prompt}"
+    )
+
+    progress = await update.effective_message.reply_text("🧠 Planning project... " + build_progress_bar(10))
+    plan_text = ""
+    last_edit = 0
+
+    try:
+        async for chunk in services.ai.stream(uid, planning_prompt):
+            plan_text += chunk
+            plan_len = len(plan_text)
+            if plan_len - last_edit >= PLANNING_EDIT_THRESHOLD:
+                last_edit = plan_len
+                await progress.edit_text(
+                    clamp_text(f"🧠 Planning... ({plan_len} chars)\n\n" + plan_text[-2000:])
+                )
+
+        await _set_pending_generation(services, uid, action=action, prompt=user_prompt, plan=plan_text)
+        await progress.edit_text(
+            clamp_text(
+                "✅ Plan created.\n\n"
+                f"{plan_text}\n\n"
+                "Send CONTINUE or press the button when you want file generation to start."
+            ),
+            reply_markup=action_keyboard(include_continue=True),
+        )
+    except (AIEngineError, SecurityError, Exception) as exc:
+        services.logger.exception("Planning mode failed")
+        await services.memory.increment_errors()
+        await progress.edit_text(clamp_text(f"❌ Planning error: {exc}"))
+
+
+async def _run_generation_from_pending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    services = services_from_context(context)
+    uid = int(update.effective_user.id)
+    pending = await _get_pending_generation(services, uid)
+    if not pending:
+        await update.effective_message.reply_text("No pending plan found. Use /build or /fix first.")
+        return
+
+    action = str(pending.get("action", "build"))
+    user_prompt = str(pending.get("prompt", "")).strip()
+    if not user_prompt:
+        await update.effective_message.reply_text("Pending task is invalid. Start again with /build.")
+        await _clear_pending_generation(services, uid)
+        return
+
+    generation_prompt = (
+        "Generate the project now from the approved plan. "
+        "Output files only using this exact format and nothing else for code:\n"
+        "FILE: path/to/file.ext\n```language\n<full content>\n```\n\n"
+        "Requirements:\n"
+        "- Include nested directories in file paths\n"
+        "- Complete file contents, no placeholders\n"
+        "- Production-ready Python 3.11 compatible where relevant\n"
+        "- If a file is unchanged, do not include it\n\n"
+        f"Task type: {action}\n"
+        f"User request: {user_prompt}"
+    )
+
+    progress = await update.effective_message.reply_text("⚙️ Generating files... " + build_progress_bar(20))
     content = ""
     last_edit = 0
 
     try:
-        async for chunk in services.ai.stream(uid, task_prompt):
+        async for chunk in services.ai.stream(uid, generation_prompt):
             content += chunk
-            if len(content) - last_edit > 350:
-                last_edit = len(content)
-                await progress.edit_text(clamp_text("⏳ Working...\n\n" + content[-1200:]))
+            content_len = len(content)
+            if content_len - last_edit >= GENERATION_EDIT_THRESHOLD:
+                last_edit = content_len
+                await progress.edit_text(
+                    clamp_text(f"⚙️ Generating files... ({content_len} chars received)\n\nStreaming in progress.")
+                )
 
-        files = services.ai.extract_files(content)
-        saved_files = []
-        for rel, file_content in files.items():
-            await services.files.write_file(uid, rel, file_content)
-            saved_files.append(rel)
+        blocks = services.ai.extract_file_blocks(content)
+        if not blocks:
+            await progress.edit_text("❌ No valid FILE blocks found in AI response. Generation aborted.")
+            return
 
-        summary = "✅ Completed\n"
-        if saved_files:
-            summary += "\n📄 Saved files:\n" + "\n".join(f"- {f}" for f in saved_files)
-        await progress.edit_text(clamp_text(summary + "\n\n" + content[:2500]))
+        await progress.edit_text(f"💾 Saving {len(blocks)} file(s)... " + build_progress_bar(65))
+        save_payload = [(item.path, item.content, item.language) for item in blocks]
+        saved = await services.files.write_files(uid, save_payload, project_name="default")
+
+        await progress.edit_text("📦 Creating ZIP... " + build_progress_bar(90))
+        zip_path = services.files.export_zip(uid)
+
+        saved_names = [item.path for item in saved]
+        summary = (
+            "✅ Generation completed.\n"
+            f"Saved files: {len(saved)}\n\n"
+            f"{summarize_saved_files(saved_names)}"
+        )
+        await progress.edit_text(clamp_text(summary), reply_markup=action_keyboard(include_continue=True))
+
+        with open(zip_path, "rb") as archive:
+            await update.effective_message.reply_document(
+                document=archive,
+                filename=Path(zip_path).name,
+                caption="📦 Auto-generated ZIP is ready.",
+                reply_markup=action_keyboard(include_continue=False),
+            )
+
+        await _clear_pending_generation(services, uid)
 
     except (AIEngineError, SecurityError, Exception) as exc:
-        services.logger.exception("AI task failed")
+        services.logger.exception("Generation mode failed")
         await services.memory.increment_errors()
-        await progress.edit_text(clamp_text(f"❌ Error: {exc}"))
+        await progress.edit_text(clamp_text(f"❌ Generation error: {exc}"))
 
 
 async def build_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     services = services_from_context(context)
     if not await services.middleware.ensure_user_allowed(update, context):
         return
+
     prompt = " ".join(context.args).strip() if context.args else "Build a complete production-ready app."
-    task = (
-        "You are building a software project. Return normal explanation and, for each file, use this format:\n"
-        "FILE: path/to/file.ext\n```language\n<full content>\n```\n\n"
-        f"User request: {prompt}"
-    )
-    await _run_ai_task(update, context, task)
+    prompt = services.security.validate_user_text(prompt, max_length=services.config.config.limits.max_prompt_chars)
+    await _run_planning_mode(update, context, action="build", user_prompt=prompt)
 
 
 async def fix_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     services = services_from_context(context)
     if not await services.middleware.ensure_user_allowed(update, context):
         return
+
     prompt = " ".join(context.args).strip() if context.args else "Fix errors in the current project."
-    await _run_ai_task(update, context, f"Debug and fix the project. Request: {prompt}")
+    prompt = services.security.validate_user_text(prompt, max_length=services.config.config.limits.max_prompt_chars)
+    await _run_planning_mode(update, context, action="fix", user_prompt=prompt)
 
 
 async def continue_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     services = services_from_context(context)
     if not await services.middleware.ensure_user_allowed(update, context):
         return
-    prompt = " ".join(context.args).strip() if context.args else "Continue previous project from memory."
-    await _run_ai_task(update, context, prompt)
+    await _run_generation_from_pending(update, context)
 
 
 async def run_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -225,7 +389,7 @@ async def run_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     project_dir = str(services.files.user_project_dir(uid))
     cmd = " ".join(context.args).strip() if context.args else "python3 main.py"
 
-    msg = await update.message.reply_text(f"🐳 Running in Docker:\n`{safe_markdown(cmd)}`", parse_mode=ParseMode.MARKDOWN_V2)
+    msg = await update.effective_message.reply_text(f"🐳 Running in Docker:\n`{safe_markdown(cmd)}`", parse_mode=ParseMode.MARKDOWN_V2)
     result = await services.docker.run(project_dir, cmd)
     body = (
         f"Exit: {result.exit_code}\n"
@@ -236,32 +400,43 @@ async def run_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await msg.edit_text(clamp_text(body))
 
 
+async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    services = services_from_context(context)
+    if not await services.middleware.ensure_user_allowed(update, context):
+        return
+
+    text = (update.effective_message.text or "").strip()
+    if should_trigger_continue(text):
+        await _run_generation_from_pending(update, context)
+        return
+
+    await update.effective_message.reply_text(
+        "Use /build <prompt> to start planning, then send CONTINUE to generate files.",
+        reply_markup=action_keyboard(include_continue=True),
+    )
+
+
 async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    services = services_from_context(context)
+    if not await services.middleware.ensure_user_allowed(update, context):
+        return
+
     query = update.callback_query
     await query.answer()
     data = query.data or ""
 
-    fake_update = Update(
-        update_id=update.update_id,
-        message=query.message,
-        callback_query=query,
-        effective_user=update.effective_user,
-        effective_chat=update.effective_chat,
-    )
-
     if data == "cmd:build":
         context.args = ["Build a useful starter project"]
-        await build_cmd(fake_update, context)
+        await build_cmd(update, context)
     elif data == "cmd:fix":
         context.args = ["Fix project issues"]
-        await fix_cmd(fake_update, context)
+        await fix_cmd(update, context)
     elif data == "cmd:continue":
-        context.args = ["Continue last project"]
-        await continue_cmd(fake_update, context)
+        await continue_cmd(update, context)
     elif data == "cmd:files":
-        await files_cmd(fake_update, context)
+        await files_cmd(update, context)
     elif data == "cmd:zip":
-        await zip_cmd(fake_update, context)
+        await zip_cmd(update, context)
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -296,6 +471,7 @@ def main() -> None:
     app.add_handler(CommandHandler("reset", reset))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CallbackQueryHandler(callback_router, pattern=r"^cmd:"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
 
     admin_handlers = AdminHandlers(root_dir, services.config, services.memory, services.files, services.middleware)
     register_admin_handlers(app, admin_handlers)
