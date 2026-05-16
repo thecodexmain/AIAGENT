@@ -157,10 +157,16 @@ class FileManager:
             return []
         return sorted([entry.name for entry in base.iterdir() if entry.is_dir()])
 
-    def export_zip(self, user_id: int, project_name: str = "default") -> str:
+    def export_zip(self, user_id: int, project_name: str = "default", filename: str | None = None) -> str:
         project_dir = self.user_project_dir(user_id, project_name)
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-        zip_path = self.tmp_dir / f"project_{user_id}_{project_name}_{timestamp}.zip"
+        default_name = f"project_{user_id}_{project_name}_{timestamp}.zip"
+        safe_name = (filename or default_name).strip().replace("\\", "/")
+        if "/" in safe_name:
+            safe_name = Path(safe_name).name
+        if not safe_name.lower().endswith(".zip"):
+            safe_name = f"{safe_name}.zip"
+        zip_path = self.tmp_dir / safe_name
 
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             for root, _, files in os.walk(project_dir):

@@ -97,7 +97,25 @@ class AdminHandlers:
             return
         stats = await self.memory.get_stats()
         users = stats.get("active_users", [])
-        await update.message.reply_text(f"👥 Active users: {len(users)}\nIDs: {users}")
+        approvals_file = self.root_dir / "data" / "approved_users.json"
+        approved_count = 0
+        denied_count = 0
+        if approvals_file.exists():
+            try:
+                import json
+
+                payload = json.loads(approvals_file.read_text(encoding="utf-8"))
+                approved_count = len(payload.get("approved_users", []))
+                denied_count = len(payload.get("denied_users", []))
+            except Exception:
+                approved_count = 0
+                denied_count = 0
+        await update.message.reply_text(
+            f"👥 Active users: {len(users)}\n"
+            f"✅ Approved users: {approved_count}\n"
+            f"❌ Denied users: {denied_count}\n"
+            f"IDs: {users}"
+        )
 
     async def broadcast(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._guard(update):
