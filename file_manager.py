@@ -116,6 +116,12 @@ class FileManager:
         async with aiofiles.open(target, "r", encoding="utf-8") as handle:
             return await handle.read()
 
+    def user_file_path(self, user_id: int, relative_path: str, project_name: str = "default") -> Path:
+        project_dir = self.user_project_dir(user_id, project_name)
+        safe_relative = self._validate_relative_path(relative_path)
+        target = self.security.secure_join(str(project_dir), safe_relative)
+        return Path(target)
+
     def list_files(self, user_id: int, project_name: str = "default") -> list[str]:
         project_dir = self.user_project_dir(user_id, project_name)
         files: list[str] = []

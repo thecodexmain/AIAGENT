@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import io
 import os
+import re
+import time
 from pathlib import Path
 from typing import Any
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+import aiofiles
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -26,20 +30,17 @@ from memory import MemoryManager
 from middleware import MiddlewareService
 from security import SecurityError, SecurityManager
 from utils import (
-    build_progress_bar,
     clamp_text,
     format_stats_message,
     get_system_stats,
     safe_markdown,
     setup_logging,
     should_trigger_continue,
-    summarize_saved_files,
     utc_now_iso,
 )
 
 SESSION_PENDING_KEY = "pending_generation"
-PLANNING_EDIT_THRESHOLD = 350
-GENERATION_EDIT_THRESHOLD = 500
+STATUS_EDIT_MIN_INTERVAL_SECONDS = 1.5
 
 
 class BotServices:
@@ -63,16 +64,12 @@ def services_from_context(context: ContextTypes.DEFAULT_TYPE) -> BotServices:
     return context.application.bot_data["services"]
 
 
-def action_keyboard(include_continue: bool = True) -> InlineKeyboardMarkup:
+def action_keyboard(include_continue: bool = True, include_stop: bool = True) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     if include_continue:
         rows.append([InlineKeyboardButton("▶ CONTINUE", callback_data="cmd:continue")])
-    rows.append(
-        [
-            InlineKeyboardButton("📦 DOWNLOAD ZIP", callback_data="cmd:zip"),
-            InlineKeyboardButton("📁 SHOW FILES", callback_data="cmd:files"),
-        ]
-    )
+    if include_stop:
+        rows.append([InlineKeyboardButton("⛔ STOP", callback_data="cmd:stop")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -84,12 +81,34 @@ async def _save_session(services: BotServices, user_id: int, session: dict[str, 
     await services.memory.save_session(user_id, session)
 
 
-async def _set_pending_generation(services: BotServices, user_id: int, action: str, prompt: str, plan: str) -> None:
+def _extract_required_files(plan_text: str) -> list[str]:
+    pattern = re.compile(r"(?m)^\s*(?:[-*]\s*|[0-9]+\.\s*)?([A-Za-z0-9_./-]+\.[A-Za-z0-9]+)\s*$")
+    seen: set[str] = set()
+    files: list[str] = []
+    for match in pattern.finditer(plan_text):
+        rel = match.group(1).strip().lstrip("./")
+        if not rel or rel in seen:
+            continue
+        seen.add(rel)
+        files.append(rel)
+    return files
+
+
+async def _set_pending_generation(
+    services: BotServices,
+    user_id: int,
+    action: str,
+    prompt: str,
+    plan: str,
+    expected_files: list[str] | None = None,
+) -> None:
     session = await _load_session(services, user_id)
     session[SESSION_PENDING_KEY] = {
         "action": action,
         "prompt": prompt,
         "plan": plan,
+        "expected_files": expected_files or [],
+        "stop_requested": False,
         "created_at": utc_now_iso(),
     }
     await _save_session(services, user_id, session)
@@ -109,21 +128,26 @@ async def _get_pending_generation(services: BotServices, user_id: int) -> dict[s
     return None
 
 
+async def _set_stop_requested(services: BotServices, user_id: int, requested: bool) -> None:
+    session = await _load_session(services, user_id)
+    pending = session.get(SESSION_PENDING_KEY)
+    if isinstance(pending, dict):
+        pending["stop_requested"] = requested
+        await _save_session(services, user_id, session)
+
+
+async def _is_stop_requested(services: BotServices, user_id: int) -> bool:
+    pending = await _get_pending_generation(services, user_id)
+    return bool(isinstance(pending, dict) and pending.get("stop_requested"))
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     services = services_from_context(context)
     if not await services.middleware.ensure_user_allowed(update, context):
         return
 
-    keyboard = InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("🛠 Build", callback_data="cmd:build")],
-            [InlineKeyboardButton("🐞 Fix", callback_data="cmd:fix"), InlineKeyboardButton("▶ CONTINUE", callback_data="cmd:continue")],
-            [InlineKeyboardButton("📁 SHOW FILES", callback_data="cmd:files"), InlineKeyboardButton("📦 DOWNLOAD ZIP", callback_data="cmd:zip")],
-        ]
-    )
     await update.effective_message.reply_text(
-        "👋 Welcome to AIAGENT!\nUse /build <prompt> to start planning, then send CONTINUE.",
-        reply_markup=keyboard,
+        "👋 Welcome to AIAGENT!\nUse /build <prompt> (or /fix <prompt>), then CONTINUE or /stop.",
     )
 
 
@@ -137,9 +161,9 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/start, /help, /build, /fix, /continue, /run, /zip, /files,\n"
         "/delete, /history, /reset, /status\n\n"
         "Workflow:\n"
-        "1) /build <task> or /fix <task> generates a project plan only\n"
-        "2) Send CONTINUE or /continue to generate and save files\n"
-        "3) Bot auto-exports ZIP and can resend with /zip"
+        "1) /build <task> or /fix <task> generates only plan.txt\n"
+        "2) Use CONTINUE to generate files, STOP to cancel safely\n"
+        "3) Bot auto-sends each file and then auto-sends ZIP"
     )
     await update.effective_message.reply_text(message)
 
@@ -214,13 +238,13 @@ async def zip_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     uid = int(update.effective_user.id)
     zip_path = services.files.export_zip(uid)
-    with open(zip_path, "rb") as archive:
-        await update.effective_message.reply_document(
-            document=archive,
-            filename=Path(zip_path).name,
-            caption="📦 Project ZIP",
-            reply_markup=action_keyboard(include_continue=False),
-        )
+    async with aiofiles.open(zip_path, "rb") as archive:
+        zip_bytes = await archive.read()
+    await update.effective_message.reply_document(
+        document=InputFile(io.BytesIO(zip_bytes), filename=Path(zip_path).name),
+        filename=Path(zip_path).name,
+        caption="📦 Project ZIP",
+    )
 
 
 async def _run_planning_mode(
@@ -233,46 +257,47 @@ async def _run_planning_mode(
     uid = int(update.effective_user.id)
 
     planning_prompt = (
-        "Create a project architecture plan only. Do NOT generate any code and do NOT output any FILE blocks. "
-        "The response must include:\n"
-        "1) Architecture overview\n"
-        "2) Folder structure tree\n"
-        "3) Full file paths to be created\n"
-        "4) Purpose of every file\n"
-        "5) Execution flow step-by-step\n"
-        "6) Dependencies and why they are needed\n"
-        "End with: WAITING FOR CONTINUE\n\n"
+        "Return ONLY a simple project plan for the requested task. "
+        "Do NOT output any code and do NOT output FILE blocks.\n\n"
+        "Your plan must contain ONLY these sections:\n"
+        "1) Project Plan\n"
+        "2) Minimal File Tree\n"
+        "3) Required Files Only\n"
+        "4) Short Explanation\n\n"
+        "Keep it concise and minimal. Avoid overengineering.\n"
         f"Task type: {action}\n"
         f"User request: {user_prompt}"
     )
 
-    progress = await update.effective_message.reply_text("🧠 Planning project... " + build_progress_bar(10))
-    plan_text = ""
-    last_edit = 0
-
     try:
-        async for chunk in services.ai.stream(uid, planning_prompt):
-            plan_text += chunk
-            plan_len = len(plan_text)
-            if plan_len - last_edit >= PLANNING_EDIT_THRESHOLD:
-                last_edit = plan_len
-                await progress.edit_text(
-                    clamp_text(f"🧠 Planning... ({plan_len} chars)\n\n" + plan_text[-2000:])
-                )
+        plan_response = await services.ai.ask(uid, planning_prompt)
+        plan_text = plan_response.text.strip()
+        if not plan_text:
+            raise AIEngineError("Planning response was empty")
 
-        await _set_pending_generation(services, uid, action=action, prompt=user_prompt, plan=plan_text)
-        await progress.edit_text(
-            clamp_text(
-                "✅ Plan created.\n\n"
-                f"{plan_text}\n\n"
-                "Send CONTINUE or press the button when you want file generation to start."
-            ),
-            reply_markup=action_keyboard(include_continue=True),
+        expected_files = _extract_required_files(plan_text)
+        await _set_pending_generation(
+            services,
+            uid,
+            action=action,
+            prompt=user_prompt,
+            plan=plan_text,
+            expected_files=expected_files,
+        )
+
+        await services.files.write_file(uid, "plan.txt", plan_text, project_name="default")
+        plan_path = services.files.user_file_path(uid, "plan.txt", project_name="default")
+        async with aiofiles.open(plan_path, "rb") as plan_doc:
+            plan_bytes = await plan_doc.read()
+        await update.effective_message.reply_document(
+            document=InputFile(io.BytesIO(plan_bytes), filename="plan.txt"),
+            filename="plan.txt",
+            reply_markup=action_keyboard(include_continue=True, include_stop=True),
         )
     except (AIEngineError, SecurityError, Exception) as exc:
         services.logger.exception("Planning mode failed")
         await services.memory.increment_errors()
-        await progress.edit_text(clamp_text(f"❌ Planning error: {exc}"))
+        await update.effective_message.reply_text(clamp_text(f"❌ Planning error: {exc}"))
 
 
 async def _run_generation_from_pending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -285,65 +310,118 @@ async def _run_generation_from_pending(update: Update, context: ContextTypes.DEF
 
     action = str(pending.get("action", "build"))
     user_prompt = str(pending.get("prompt", "")).strip()
+    plan_text = str(pending.get("plan", "")).strip()
+    expected_files = pending.get("expected_files")
+    if not isinstance(expected_files, list):
+        expected_files = []
+    total_expected = len(expected_files)
     if not user_prompt:
         await update.effective_message.reply_text("Pending task is invalid. Start again with /build.")
         await _clear_pending_generation(services, uid)
         return
 
+    await _set_stop_requested(services, uid, requested=False)
     generation_prompt = (
-        "Generate the project now from the approved plan. "
-        "Output files only using this exact format and nothing else for code:\n"
+        "Generate the project now from the approved plan.\n"
+        "Output ONLY file blocks using this exact format:\n"
         "FILE: path/to/file.ext\n```language\n<full content>\n```\n\n"
         "Requirements:\n"
-        "- Include nested directories in file paths\n"
-        "- Complete file contents, no placeholders\n"
-        "- Production-ready Python 3.11 compatible where relevant\n"
-        "- If a file is unchanged, do not include it\n\n"
+        "- Generate ONLY required files\n"
+        "- Do NOT add extra configs, folders, infra, or optional files\n"
+        "- Include full file content, no placeholders\n"
+        "- Preserve original file extensions\n"
+        "- One file block per file\n\n"
+        f"Approved plan:\n{plan_text}\n\n"
         f"Task type: {action}\n"
         f"User request: {user_prompt}"
     )
 
-    progress = await update.effective_message.reply_text("⚙️ Generating files... " + build_progress_bar(20))
+    progress = await update.effective_message.reply_text(
+        "🤖 Generating Project\n\nCurrent File:\n-\n\nCompleted:\n0/"
+        + (str(total_expected) if total_expected else "?")
+    )
     content = ""
-    last_edit = 0
+    processed_blocks = 0
+    saved_count = 0
+    current_file = "-"
+    canceled = False
+    last_status_edit_at = 0.0
 
     try:
         async for chunk in services.ai.stream(uid, generation_prompt):
             content += chunk
-            content_len = len(content)
-            if content_len - last_edit >= GENERATION_EDIT_THRESHOLD:
-                last_edit = content_len
-                await progress.edit_text(
-                    clamp_text(f"⚙️ Generating files... ({content_len} chars received)\n\nStreaming in progress.")
+
+            if await _is_stop_requested(services, uid):
+                canceled = True
+                break
+
+            blocks = services.ai.extract_file_blocks(content)
+            if len(blocks) <= processed_blocks:
+                continue
+
+            new_blocks = blocks[processed_blocks:]
+            for item in new_blocks:
+                if await _is_stop_requested(services, uid):
+                    canceled = True
+                    break
+
+                current_file = item.path
+                await services.files.write_file(uid, item.path, item.content, project_name="default")
+                saved_count += 1
+
+                file_buffer = io.BytesIO(item.content.encode("utf-8"))
+                filename = Path(item.path).name
+                await update.effective_message.reply_document(
+                    document=InputFile(file_buffer, filename=filename),
+                    filename=filename,
                 )
 
-        blocks = services.ai.extract_file_blocks(content)
-        if not blocks:
+                now = time.monotonic()
+                if now - last_status_edit_at >= STATUS_EDIT_MIN_INTERVAL_SECONDS:
+                    await progress.edit_text(
+                        clamp_text(
+                            "🤖 Generating Project\n\n"
+                            f"Current File:\n{current_file}\n\n"
+                            f"Completed:\n{saved_count}/{total_expected if total_expected else '?'}"
+                        )
+                    )
+                    last_status_edit_at = now
+
+            processed_blocks = len(blocks)
+            if canceled:
+                break
+
+        if canceled:
+            await progress.edit_text(
+                clamp_text(
+                    "⛔ Generation stopped safely.\n\n"
+                    f"Current File:\n{current_file}\n\n"
+                    f"Completed:\n{saved_count}/{total_expected if total_expected else '?'}"
+                ),
+                reply_markup=action_keyboard(include_continue=True, include_stop=True),
+            )
+            return
+
+        if saved_count == 0:
             await progress.edit_text("❌ No valid FILE blocks found in AI response. Generation aborted.")
             return
 
-        await progress.edit_text(f"💾 Saving {len(blocks)} file(s)... " + build_progress_bar(65))
-        save_payload = [(item.path, item.content, item.language) for item in blocks]
-        saved = await services.files.write_files(uid, save_payload, project_name="default")
-
-        await progress.edit_text("📦 Creating ZIP... " + build_progress_bar(90))
         zip_path = services.files.export_zip(uid)
-
-        saved_names = [item.path for item in saved]
-        summary = (
-            "✅ Generation completed.\n"
-            f"Saved files: {len(saved)}\n\n"
-            f"{summarize_saved_files(saved_names)}"
+        await progress.edit_text(
+            clamp_text(
+                "✅ Generation Completed\n\n"
+                f"Current File:\n{current_file}\n\n"
+                f"Completed:\n{saved_count}/{total_expected if total_expected else saved_count}"
+            ),
+            reply_markup=action_keyboard(include_continue=True, include_stop=True),
         )
-        await progress.edit_text(clamp_text(summary), reply_markup=action_keyboard(include_continue=True))
 
-        with open(zip_path, "rb") as archive:
-            await update.effective_message.reply_document(
-                document=archive,
-                filename=Path(zip_path).name,
-                caption="📦 Auto-generated ZIP is ready.",
-                reply_markup=action_keyboard(include_continue=False),
-            )
+        async with aiofiles.open(zip_path, "rb") as archive:
+            zip_bytes = await archive.read()
+        await update.effective_message.reply_document(
+            document=InputFile(io.BytesIO(zip_bytes), filename=Path(zip_path).name),
+            filename=Path(zip_path).name,
+        )
 
         await _clear_pending_generation(services, uid)
 
@@ -380,6 +458,19 @@ async def continue_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await _run_generation_from_pending(update, context)
 
 
+async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    services = services_from_context(context)
+    if not await services.middleware.ensure_user_allowed(update, context):
+        return
+    uid = int(update.effective_user.id)
+    pending = await _get_pending_generation(services, uid)
+    if not pending:
+        await update.effective_message.reply_text("No active generation to stop.")
+        return
+    await _set_stop_requested(services, uid, requested=True)
+    await update.effective_message.reply_text("⛔ Stop requested. Generation will stop safely.")
+
+
 async def run_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     services = services_from_context(context)
     if not await services.middleware.ensure_user_allowed(update, context):
@@ -412,7 +503,7 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     await update.effective_message.reply_text(
         "Use /build <prompt> to start planning, then send CONTINUE to generate files.",
-        reply_markup=action_keyboard(include_continue=True),
+        reply_markup=action_keyboard(include_continue=True, include_stop=True),
     )
 
 
@@ -433,6 +524,8 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await fix_cmd(update, context)
     elif data == "cmd:continue":
         await continue_cmd(update, context)
+    elif data == "cmd:stop":
+        await stop_cmd(update, context)
     elif data == "cmd:files":
         await files_cmd(update, context)
     elif data == "cmd:zip":
@@ -463,6 +556,7 @@ def main() -> None:
     app.add_handler(CommandHandler("build", build_cmd))
     app.add_handler(CommandHandler("fix", fix_cmd))
     app.add_handler(CommandHandler("continue", continue_cmd))
+    app.add_handler(CommandHandler("stop", stop_cmd))
     app.add_handler(CommandHandler("run", run_cmd))
     app.add_handler(CommandHandler("zip", zip_cmd))
     app.add_handler(CommandHandler("files", files_cmd))
