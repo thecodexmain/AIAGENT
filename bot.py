@@ -37,6 +37,8 @@ from utils import (
     format_elapsed,
     format_stats_message,
     get_system_stats,
+    is_truthy_env,
+    normalize_whitespace,
     safe_markdown,
     setup_logging,
     should_trigger_continue,
@@ -48,6 +50,7 @@ SESSION_STATUS_KEY = "status_panel"
 SESSION_RENAME_CHAT_KEY = "pending_rename_chat_id"
 STATUS_EDIT_MIN_INTERVAL_SECONDS = 1.2
 DEFAULT_STATUS_TEXT = "Idle and ready"
+PROMPT_ENHANCEMENT_DEBUG_ENV = "AIAGENT_DEBUG_PROMPT_ENHANCEMENT"
 
 
 class BotServices:
@@ -241,6 +244,7 @@ async def _set_pending_generation(
     user_id: int,
     action: str,
     prompt: str,
+    enhanced_prompt: str,
     plan: str,
     expected_files: list[str] | None = None,
 ) -> None:
@@ -248,11 +252,14 @@ async def _set_pending_generation(
     session[SESSION_PENDING_KEY] = {
         "action": action,
         "prompt": prompt,
+        "enhanced_prompt": enhanced_prompt,
         "plan": plan,
         "expected_files": expected_files or [],
         "stop_requested": False,
         "created_at": utc_now_iso(),
     }
+    session["last_user_prompt"] = prompt
+    session["last_enhanced_prompt"] = enhanced_prompt
     await _save_session(services, user_id, session)
 
 
@@ -295,6 +302,12 @@ async def _chat_list_text(services: BotServices, user_id: int) -> tuple[str, lis
     return "\n".join(lines), chats
 
 
+def _prompt_debug_enabled(session: dict[str, Any]) -> bool:
+    env_enabled = is_truthy_env(os.getenv(PROMPT_ENHANCEMENT_DEBUG_ENV))
+    session_enabled = bool(session.get("prompt_enhancement_debug"))
+    return env_enabled or session_enabled
+
+
 async def _run_planning_mode(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -304,6 +317,10 @@ async def _run_planning_mode(
     services = services_from_context(context)
     uid = int(update.effective_user.id)
     active_chat_id = await services.memory.get_active_chat_id(uid)
+    session = await _load_session(services, uid)
+    debug_enabled = _prompt_debug_enabled(session)
+    enhancement = services.ai.enhance_prompt(user_prompt, task_type=action)
+    enhanced_prompt = normalize_whitespace(enhancement.enhanced_prompt)
     started = time.monotonic()
 
     planning_prompt = (
@@ -311,12 +328,19 @@ async def _run_planning_mode(
         "Do NOT output source code and do NOT output FILE blocks.\n\n"
         "Your plan must contain ONLY these sections:\n"
         "1) Project Plan\n"
-        "2) Minimal File Tree\n"
-        "3) Required Files Only\n"
-        "4) Short Explanation\n\n"
+        "2) UX Direction and Visual Style\n"
+        "3) Component Strategy\n"
+        "4) Responsiveness Strategy\n"
+        "5) Animation Strategy\n"
+        "6) SVG and Icon Strategy\n"
+        "7) Minimal File Tree\n"
+        "8) Required Files Only\n"
+        "9) Short Explanation\n\n"
         "Keep it concise and minimal.\n"
+        "Do not reveal the internal enhanced specification verbatim unless debug mode is explicitly enabled.\n"
+        f"Internal enhanced specification: {enhanced_prompt}\n"
         f"Task type: {action}\n"
-        f"User request: {user_prompt}"
+        f"User request: {enhancement.original_prompt}"
     )
 
     try:
@@ -363,7 +387,8 @@ async def _run_planning_mode(
             services,
             uid,
             action=action,
-            prompt=user_prompt,
+            prompt=enhancement.original_prompt,
+            enhanced_prompt=enhanced_prompt,
             plan=plan_text,
             expected_files=expected_files,
         )
@@ -378,6 +403,8 @@ async def _run_planning_mode(
             caption="📝 Plan ready. Tap CONTINUE to generate files.",
             reply_markup=_status_keyboard(include_continue=True),
         )
+        if debug_enabled:
+            await update.effective_message.reply_text(clamp_text(f"🧪 Debug enhanced prompt:\n{enhanced_prompt}"))
         await _upsert_status_message(
             update,
             context,
@@ -435,6 +462,7 @@ async def _run_generation_from_pending(update: Update, context: ContextTypes.DEF
 
     action = str(pending.get("action", "build"))
     user_prompt = str(pending.get("prompt", "")).strip()
+    enhanced_prompt = normalize_whitespace(str(pending.get("enhanced_prompt", "")).strip())
     plan_text = str(pending.get("plan", "")).strip()
     expected_files = pending.get("expected_files")
     if not isinstance(expected_files, list):
@@ -456,6 +484,9 @@ async def _run_generation_from_pending(update: Update, context: ContextTypes.DEF
         "- Include full file content, no placeholders\n"
         "- Preserve original file extensions and folder structure\n"
         "- One file block per file\n\n"
+        "Apply premium engineering and product quality standards automatically.\n"
+        "Use modern UX defaults, accessibility, responsive behavior, polished states, and SVG-first assets when relevant.\n"
+        f"Enhanced internal specification:\n{enhanced_prompt or user_prompt}\n\n"
         f"Approved plan:\n{plan_text}\n\n"
         f"Task type: {action}\n"
         f"User request: {user_prompt}"

@@ -14,6 +14,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 from config_manager import ConfigManager
 from memory import MemoryManager
+from utils import normalize_whitespace
 
 
 class AIEngineError(Exception):
@@ -33,6 +34,12 @@ class AIResponse:
     files: dict[str, str]
 
 
+@dataclass
+class PromptEnhancement:
+    original_prompt: str
+    enhanced_prompt: str
+
+
 FILE_BLOCK_RE = re.compile(
     r"FILE:\s*(?P<path>[^\r\n]+)\r?\n```(?P<lang>[\w.+-]*)\r?\n(?P<content>[\s\S]*?)\r?\n```",
     re.MULTILINE,
@@ -46,6 +53,18 @@ class AIEngine:
         self.config = config
         self.memory = memory
         self.logger = logging.getLogger("aiagent")
+        self._premium_defaults: tuple[str, ...] = (
+            "modern UI/UX with clean typography and spacing consistency",
+            "fully responsive behavior across mobile, tablet, and desktop",
+            "smooth animations, transitions, and polished interaction states",
+            "accessibility-first semantics and keyboard/screen-reader usability",
+            "SVG-first icons, logos, and scalable vector illustrations",
+            "reusable component architecture and cohesive design system",
+            "loading, empty, error, and hover/focus states",
+            "modern color palette with dark/light readiness when appropriate",
+            "SEO fundamentals and front-end performance best practices",
+            "production-ready structure, naming, and maintainable code quality",
+        )
 
     async def _headers(self) -> dict[str, str]:
         return {
@@ -113,6 +132,54 @@ class AIEngine:
         if not isinstance(choices, list):
             return []
         return [choice for choice in choices if choice is not None]
+
+    @staticmethod
+    def _infer_context_tags(prompt: str) -> list[str]:
+        lower = prompt.lower()
+        tags: list[str] = []
+        if any(token in lower for token in ("login", "signup", "auth", "account", "password")):
+            tags.append("secure authentication UX with robust validation and clear feedback")
+        if any(token in lower for token in ("dashboard", "admin", "panel", "analytics")):
+            tags.append("data-dense dashboard layout with scalable navigation patterns")
+        if any(token in lower for token in ("form", "submit", "input", "checkout", "payment")):
+            tags.append("high-conversion form UX with validation, helper text, and safe submission flows")
+        if any(token in lower for token in ("api", "backend", "server", "database")):
+            tags.append("clean API contracts, error handling, and maintainable service architecture")
+        if any(token in lower for token in ("landing", "marketing", "portfolio", "home page", "homepage")):
+            tags.append("premium visual storytelling with strong hierarchy and conversion-ready sections")
+        if any(token in lower for token in ("fix", "bug", "error", "issue", "crash")):
+            tags.append("root-cause analysis, minimal-risk fixes, and regression-safe implementation")
+        if any(token in lower for token in ("refactor", "cleanup", "improve", "optimize")):
+            tags.append("improved naming, structure, and performance with preserved behavior")
+        return tags
+
+    def enhance_prompt(self, prompt: str, task_type: str = "build") -> PromptEnhancement:
+        original = normalize_whitespace(prompt)
+        base_prompt = original or "Build a complete production-ready software solution."
+        inferred = self._infer_context_tags(base_prompt)
+        task = (task_type or "build").strip().lower()
+        task_focus = (
+            "prioritize robust implementation quality, architecture, and polished product experience"
+            if task == "build"
+            else "prioritize debugging precision, safe fixes, and production-grade polish in touched areas"
+        )
+        quality_bar = (
+            "Deliver a premium, production-grade result similar in quality expectations to top-tier AI coding agents. "
+            "Fill missing requirements intelligently, remove ambiguity, and avoid basic template-level output."
+        )
+        premium_defaults = "; ".join(self._premium_defaults)
+        inferred_text = "; ".join(inferred) if inferred else "context-aware architecture and UX enhancements inferred from intent"
+
+        enhanced = (
+            f"User intent: {base_prompt}. "
+            f"Task mode: {task}. "
+            f"{quality_bar} "
+            f"Always include: {premium_defaults}. "
+            f"Inferred requirements: {inferred_text}. "
+            f"Execution focus: {task_focus}. "
+            "Generate only required files, but ensure each file is polished, cohesive, and production-ready with no placeholders."
+        )
+        return PromptEnhancement(original_prompt=base_prompt, enhanced_prompt=enhanced)
 
     @retry(wait=wait_exponential(multiplier=1, min=1, max=8), stop=stop_after_attempt(3), reraise=True)
     async def ask(

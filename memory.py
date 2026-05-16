@@ -94,6 +94,8 @@ class MemoryManager:
             "active_project": "default",
             "pending_task": "",
             "active_chat_id": "",
+            "last_user_prompt": "",
+            "last_enhanced_prompt": "",
         }
 
     async def load_session(self, user_id: int) -> dict[str, Any]:

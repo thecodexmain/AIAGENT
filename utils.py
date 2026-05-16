@@ -138,3 +138,12 @@ def merge_dict(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]
         else:
             result[key] = value
     return result
+
+
+def normalize_whitespace(text: str) -> str:
+    return " ".join((text or "").split()).strip()
+
+
+def is_truthy_env(value: str | None) -> bool:
+    normalized = (value or "").strip().lower()
+    return normalized in {"1", "true", "yes", "on", "enabled"}
