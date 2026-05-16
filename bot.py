@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import os
 import re
@@ -12,7 +13,7 @@ from typing import Any, Awaitable, Callable
 import aiofiles
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.constants import ParseMode
-from telegram.error import BadRequest
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -390,6 +391,21 @@ async def _run_planning_mode(
             keyboard=_status_keyboard(include_continue=True),
             force=True,
         )
+    except asyncio.CancelledError:
+        await _upsert_status_message(
+            update,
+            context,
+            status="Planning Cancelled",
+            task="Operation cancelled",
+            progress_percent=100,
+            files_done=0,
+            files_total=None,
+            started_at=started,
+            current_file="-",
+            keyboard=_status_keyboard(include_continue=True),
+            force=True,
+        )
+        raise
     except (AIEngineError, SecurityError, Exception) as exc:
         services.logger.exception("Planning mode failed")
         await services.memory.increment_errors()
@@ -506,7 +522,7 @@ async def _run_generation_from_pending(update: Update, context: ContextTypes.DEF
                     caption=f"✅ Generated: {item.path}",
                 )
 
-                if total_expected is not None:
+                if total_expected is not None and total_expected > 0:
                     pct = min(95, int((saved_count / total_expected) * 100))
                 else:
                     pct = min(95, 12 + saved_count * 10)
@@ -612,6 +628,21 @@ async def _run_generation_from_pending(update: Update, context: ContextTypes.DEF
             keyboard=_completion_keyboard(),
             force=True,
         )
+    except asyncio.CancelledError:
+        await _upsert_status_message(
+            update,
+            context,
+            status="Generation Cancelled",
+            task="Operation cancelled",
+            progress_percent=100,
+            files_done=saved_count,
+            files_total=total_expected,
+            started_at=started,
+            current_file=current_file,
+            keyboard=_status_keyboard(include_continue=True),
+            force=True,
+        )
+        raise
     except (AIEngineError, SecurityError, Exception) as exc:
         services.logger.exception("Generation mode failed")
         await services.memory.increment_errors()
@@ -905,6 +936,7 @@ async def run_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         uid = int(update.effective_user.id)
         project_dir = str(services.files.user_project_dir(uid))
         cmd = " ".join(context.args).strip() if context.args else "python3 main.py"
+        cmd = services.security.validate_command(cmd, services.docker.allowed_commands)
         msg = await update.effective_message.reply_text(
             f"🐳 Running in Docker:\n`{safe_markdown(cmd)}`", parse_mode=ParseMode.MARKDOWN_V2
         )
@@ -1015,7 +1047,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     data = query.data or ""
     try:
         await query.answer()
-    except Exception as exc:
+    except TelegramError as exc:
         services.logger.warning("Failed to answer callback query: %s", exc)
 
     try:

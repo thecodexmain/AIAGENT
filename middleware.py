@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,7 @@ class MiddlewareService:
         self.bans_file = self.root_dir / "data" / "bans.json"
         self.maintenance_file = self.root_dir / "data" / "maintenance.json"
         self.approved_users_file = self.root_dir / "data" / "approved_users.json"
+        self.logger = logging.getLogger("aiagent")
 
         if not self.bans_file.exists():
             self.bans_file.write_text("[]", encoding="utf-8")
@@ -156,8 +158,8 @@ class MiddlewareService:
             for admin_id in self.config.config.admin_ids:
                 try:
                     await context.bot.send_message(chat_id=admin_id, text=text, reply_markup=keyboard)
-                except Exception:
-                    continue
+                except Exception as exc:
+                    self.logger.warning("Approval notification failed for admin %s: %s", admin_id, exc)
 
         if send_user_notice and update.effective_message:
             await update.effective_message.reply_text(

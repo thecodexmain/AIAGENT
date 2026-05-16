@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -237,9 +238,9 @@ class MemoryManager:
             if messages_path.exists():
                 messages_path.unlink()
             if not kept:
-                chat_id_new = self._generate_chat_id()
+                new_chat_id = self._generate_chat_id()
                 now = utc_now_iso()
-                entry = {"id": chat_id_new, "title": "New Chat", "created_at": now, "updated_at": now}
+                entry = {"id": new_chat_id, "title": "New Chat", "created_at": now, "updated_at": now}
                 kept = [entry]
                 index["chats"] = kept
             active_id = str(index.get("active_chat_id", ""))
@@ -293,7 +294,7 @@ class MemoryManager:
         async with aiofiles.open(path, "r", encoding="utf-8") as handle:
             lines = (await handle.read()).splitlines()
         entries: list[dict[str, Any]] = []
-        for line in lines[-max(1, limit):]:
+        for line in lines[-limit:]:
             if not line.strip():
                 continue
             try:
@@ -313,9 +314,7 @@ class MemoryManager:
             os.remove(history_path)
         user_chat_dir = self._user_chat_dir(user_id)
         if user_chat_dir.exists():
-            for entry in user_chat_dir.glob("*"):
-                if entry.is_file():
-                    entry.unlink()
+            shutil.rmtree(user_chat_dir, ignore_errors=True)
 
     async def _load_stats(self) -> dict[str, Any]:
         async with aiofiles.open(self.stats_file, "r", encoding="utf-8") as handle:
