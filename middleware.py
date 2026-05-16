@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -40,8 +39,14 @@ class MiddlewareService:
 
         rpm = max(1, self.config.config.limits.requests_per_minute)
         self.limiter = AsyncLimiter(rpm, time_period=60)
-        self._locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self._locks: dict[int, asyncio.Lock] = {}
         self._file_lock = asyncio.Lock()
+
+    def _get_user_lock(self, user_id: int) -> asyncio.Lock:
+        uid = int(user_id)
+        if uid not in self._locks:
+            self._locks[uid] = asyncio.Lock()
+        return self._locks[uid]
 
     def _is_maintenance(self) -> bool:
         data = json.loads(self.maintenance_file.read_text(encoding="utf-8"))
@@ -189,11 +194,11 @@ class MiddlewareService:
 
     async def enter_user_queue(self, user_id: int) -> None:
         await self.limiter.acquire()
-        lock = self._locks[int(user_id)]
+        lock = self._get_user_lock(user_id)
         await lock.acquire()
 
     async def leave_user_queue(self, user_id: int) -> None:
-        lock = self._locks[int(user_id)]
+        lock = self._get_user_lock(user_id)
         if lock.locked():
             lock.release()
 

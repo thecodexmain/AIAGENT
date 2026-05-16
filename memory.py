@@ -235,7 +235,7 @@ class MemoryManager:
             index["chats"] = kept
             messages_path = self._chat_messages_path(user_id, chat_id)
             if messages_path.exists():
-                os.remove(messages_path)
+                messages_path.unlink()
             if not kept:
                 chat_id_new = self._generate_chat_id()
                 now = utc_now_iso()
@@ -284,6 +284,8 @@ class MemoryManager:
                 await handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
     async def get_recent_history(self, user_id: int, limit: int = 30, chat_id: str | None = None) -> list[dict[str, Any]]:
+        if limit <= 0:
+            return []
         cid = (chat_id or "").strip() or await self.get_active_chat_id(user_id)
         path = self._chat_messages_path(user_id, cid)
         if not path.exists():

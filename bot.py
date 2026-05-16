@@ -334,21 +334,24 @@ async def _run_planning_mode(
         )
 
         plan_chunks: list[str] = []
+        last_progress = 12
         async for chunk in services.ai.stream(uid, planning_prompt, chat_id=active_chat_id):
             plan_chunks.append(chunk)
             size = len("".join(plan_chunks))
             progress = min(90, 12 + (size // 60))
-            await _upsert_status_message(
-                update,
-                context,
-                status="Planning Project",
-                task="Drafting architecture",
-                progress_percent=progress,
-                files_done=0,
-                files_total=None,
-                started_at=started,
-                current_file="plan.txt",
-            )
+            if progress - last_progress >= 5:
+                await _upsert_status_message(
+                    update,
+                    context,
+                    status="Planning Project",
+                    task="Drafting architecture",
+                    progress_percent=progress,
+                    files_done=0,
+                    files_total=None,
+                    started_at=started,
+                    current_file="plan.txt",
+                )
+                last_progress = progress
 
         plan_text = "".join(plan_chunks).strip()
         if not plan_text:
@@ -503,7 +506,7 @@ async def _run_generation_from_pending(update: Update, context: ContextTypes.DEF
                     caption=f"✅ Generated: {item.path}",
                 )
 
-                if total_expected:
+                if total_expected is not None:
                     pct = min(95, int((saved_count / total_expected) * 100))
                 else:
                     pct = min(95, 12 + saved_count * 10)
