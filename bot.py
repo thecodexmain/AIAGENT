@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import aiofiles
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -146,7 +147,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     await update.effective_message.reply_text(
-        "👋 Welcome to AIAGENT!\nUse /build <prompt> (or /fix <prompt>) and then CONTINUE.",
+        "👋 Welcome to AIAGENT!\nUse /build <prompt> (or /fix <prompt>), then CONTINUE or /stop.",
     )
 
 
@@ -237,12 +238,13 @@ async def zip_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     uid = int(update.effective_user.id)
     zip_path = services.files.export_zip(uid)
-    with open(zip_path, "rb") as archive:
-        await update.effective_message.reply_document(
-            document=archive,
-            filename=Path(zip_path).name,
-            caption="📦 Project ZIP",
-        )
+    async with aiofiles.open(zip_path, "rb") as archive:
+        zip_bytes = await archive.read()
+    await update.effective_message.reply_document(
+        document=InputFile(io.BytesIO(zip_bytes), filename=Path(zip_path).name),
+        filename=Path(zip_path).name,
+        caption="📦 Project ZIP",
+    )
 
 
 async def _run_planning_mode(
@@ -285,12 +287,13 @@ async def _run_planning_mode(
 
         await services.files.write_file(uid, "plan.txt", plan_text, project_name="default")
         plan_path = services.files.user_file_path(uid, "plan.txt", project_name="default")
-        with open(plan_path, "rb") as plan_doc:
-            await update.effective_message.reply_document(
-                document=plan_doc,
-                filename="plan.txt",
-                reply_markup=action_keyboard(include_continue=True, include_stop=True),
-            )
+        async with aiofiles.open(plan_path, "rb") as plan_doc:
+            plan_bytes = await plan_doc.read()
+        await update.effective_message.reply_document(
+            document=InputFile(io.BytesIO(plan_bytes), filename="plan.txt"),
+            filename="plan.txt",
+            reply_markup=action_keyboard(include_continue=True, include_stop=True),
+        )
     except (AIEngineError, SecurityError, Exception) as exc:
         services.logger.exception("Planning mode failed")
         await services.memory.increment_errors()
@@ -367,7 +370,6 @@ async def _run_generation_from_pending(update: Update, context: ContextTypes.DEF
                 saved_count += 1
 
                 file_buffer = io.BytesIO(item.content.encode("utf-8"))
-                file_buffer.seek(0)
                 filename = Path(item.path).name
                 await update.effective_message.reply_document(
                     document=InputFile(file_buffer, filename=filename),
@@ -414,8 +416,12 @@ async def _run_generation_from_pending(update: Update, context: ContextTypes.DEF
             reply_markup=action_keyboard(include_continue=True, include_stop=True),
         )
 
-        with open(zip_path, "rb") as archive:
-            await update.effective_message.reply_document(document=archive, filename=Path(zip_path).name)
+        async with aiofiles.open(zip_path, "rb") as archive:
+            zip_bytes = await archive.read()
+        await update.effective_message.reply_document(
+            document=InputFile(io.BytesIO(zip_bytes), filename=Path(zip_path).name),
+            filename=Path(zip_path).name,
+        )
 
         await _clear_pending_generation(services, uid)
 
