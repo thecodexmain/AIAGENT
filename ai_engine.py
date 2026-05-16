@@ -115,8 +115,14 @@ class AIEngine:
         return [choice for choice in choices if choice is not None]
 
     @retry(wait=wait_exponential(multiplier=1, min=1, max=8), stop=stop_after_attempt(3), reraise=True)
-    async def ask(self, user_id: int, prompt: str, system_prompt: str = "You are an expert coding assistant.") -> AIResponse:
-        recent = await self.memory.get_recent_history(user_id, limit=20)
+    async def ask(
+        self,
+        user_id: int,
+        prompt: str,
+        system_prompt: str = "You are an expert coding assistant.",
+        chat_id: str | None = None,
+    ) -> AIResponse:
+        recent = await self.memory.get_recent_history(user_id, limit=20, chat_id=chat_id)
         messages = [{"role": "system", "content": system_prompt}]
         for item in recent:
             messages.append({"role": item.get("role", "user"), "content": item.get("content", "")})
@@ -148,8 +154,8 @@ class AIEngine:
         content = content.strip()
         files = self.extract_files(content)
 
-        await self.memory.append_history(user_id, "user", prompt)
-        await self.memory.append_history(user_id, "assistant", content)
+        await self.memory.append_history(user_id, "user", prompt, chat_id=chat_id)
+        await self.memory.append_history(user_id, "assistant", content, chat_id=chat_id)
         await self.memory.increment_api_calls()
 
         return AIResponse(text=content, files=files)
@@ -159,8 +165,9 @@ class AIEngine:
         user_id: int,
         prompt: str,
         system_prompt: str = "You are an expert coding assistant.",
+        chat_id: str | None = None,
     ) -> AsyncGenerator[str, None]:
-        recent = await self.memory.get_recent_history(user_id, limit=20)
+        recent = await self.memory.get_recent_history(user_id, limit=20, chat_id=chat_id)
         messages = [{"role": "system", "content": system_prompt}]
         for item in recent:
             messages.append({"role": item.get("role", "user"), "content": item.get("content", "")})
@@ -230,8 +237,8 @@ class AIEngine:
                 await asyncio.sleep(wait_for)
 
         final_text = "".join(final_text_parts).strip()
-        await self.memory.append_history(user_id, "user", prompt)
-        await self.memory.append_history(user_id, "assistant", final_text)
+        await self.memory.append_history(user_id, "user", prompt, chat_id=chat_id)
+        await self.memory.append_history(user_id, "assistant", final_text, chat_id=chat_id)
         await self.memory.increment_api_calls()
 
     @staticmethod

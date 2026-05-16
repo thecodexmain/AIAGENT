@@ -49,6 +49,21 @@ def build_progress_bar(percent: int, width: int = 20) -> str:
     return f"[{'█' * filled}{'░' * (width - filled)}] {clamped}%"
 
 
+def build_unicode_progress_bar(percent: int, width: int = 9, done_char: str = "▓", remain_char: str = "░") -> str:
+    clamped = max(0, min(100, int(percent)))
+    filled = int(round((clamped / 100) * width))
+    filled = max(0, min(width, filled))
+    bar = f"{done_char * filled}{remain_char * (width - filled)}"
+    return f"{bar} {clamped}%"
+
+
+def format_elapsed(seconds: float) -> str:
+    total = max(0, int(seconds))
+    minutes = total // 60
+    secs = total % 60
+    return f"{minutes:02d}:{secs:02d}"
+
+
 def safe_markdown(text: str) -> str:
     escape_chars = "_[]()~`>#+-=|{}.!"
     output = []
