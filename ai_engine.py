@@ -105,6 +105,15 @@ class AIEngine:
 
         return ""
 
+    @staticmethod
+    def _safe_choices(payload: Any) -> list[Any]:
+        if not isinstance(payload, dict):
+            return []
+        choices = payload.get("choices")
+        if not isinstance(choices, list):
+            return []
+        return [choice for choice in choices if choice is not None]
+
     @retry(wait=wait_exponential(multiplier=1, min=1, max=8), stop=stop_after_attempt(3), reraise=True)
     async def ask(self, user_id: int, prompt: str, system_prompt: str = "You are an expert coding assistant.") -> AIResponse:
         recent = await self.memory.get_recent_history(user_id, limit=20)
@@ -133,10 +142,8 @@ class AIEngine:
                 raise AIEngineError("AI API returned invalid JSON response") from exc
 
         content = ""
-        choices = data.get("choices")
-        if isinstance(choices, list):
-            for choice in choices:
-                content += self._extract_delta_text(choice)
+        for choice in self._safe_choices(data):
+            content += self._extract_delta_text(choice)
 
         content = content.strip()
         files = self.extract_files(content)
@@ -208,11 +215,7 @@ class AIEngine:
                             if not isinstance(chunk, dict):
                                 continue
 
-                            choices = chunk.get("choices")
-                            if not isinstance(choices, list) or not choices:
-                                continue
-
-                            for choice in choices:
+                            for choice in self._safe_choices(chunk):
                                 delta = self._extract_delta_text(choice)
                                 if delta:
                                     final_text_parts.append(delta)
