@@ -179,6 +179,18 @@ class AIEngine:
             f"Execution focus: {task_focus}. "
             "Generate only required files, but ensure each file is polished, cohesive, and production-ready with no placeholders."
         )
+        max_chars = 2800
+        if len(enhanced) > max_chars:
+            concise_defaults = "; ".join(self._premium_defaults[:6])
+            enhanced = (
+                f"User intent: {base_prompt}. Task mode: {task}. {quality_bar} "
+                f"Always include: {concise_defaults}. "
+                f"Inferred requirements: {inferred_text}. "
+                f"Execution focus: {task_focus}. "
+                "Generate only required files with production-ready quality and no placeholders."
+            )
+        if len(enhanced) > max_chars:
+            enhanced = enhanced[: max_chars - 32].rstrip() + " ...[compressed]"
         return PromptEnhancement(original_prompt=base_prompt, enhanced_prompt=enhanced)
 
     @retry(wait=wait_exponential(multiplier=1, min=1, max=8), stop=stop_after_attempt(3), reraise=True)

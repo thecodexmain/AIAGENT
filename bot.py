@@ -308,6 +308,21 @@ def _prompt_debug_enabled(session: dict[str, Any]) -> bool:
     return env_enabled or session_enabled
 
 
+def _sanitize_plan_internal_details(plan_text: str, enhanced_prompt: str, debug_enabled: bool) -> str:
+    if debug_enabled:
+        return plan_text
+    text = plan_text
+    if enhanced_prompt:
+        text = text.replace(enhanced_prompt, "[internal specification hidden]")
+    sanitized_lines: list[str] = []
+    for line in text.splitlines():
+        lowered = line.strip().lower()
+        if "internal enhanced specification" in lowered:
+            continue
+        sanitized_lines.append(line)
+    return "\n".join(sanitized_lines).strip()
+
+
 async def _run_planning_mode(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -379,6 +394,7 @@ async def _run_planning_mode(
                 last_progress = progress
 
         plan_text = "".join(plan_chunks).strip()
+        plan_text = _sanitize_plan_internal_details(plan_text, enhanced_prompt=enhanced_prompt, debug_enabled=debug_enabled)
         if not plan_text:
             raise AIEngineError("Planning response was empty")
 
