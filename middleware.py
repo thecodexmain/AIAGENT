@@ -114,7 +114,7 @@ class MiddlewareService:
             data["requests"] = requests
             self._save_approval_data(data)
 
-    async def request_approval(self, update: Update, context: ContextTypes.DEFAULT_TYPE, silent_user_notice: bool = False) -> None:
+    async def request_approval(self, update: Update, context: ContextTypes.DEFAULT_TYPE, send_user_notice: bool = True) -> None:
         user = update.effective_user
         if not user:
             return
@@ -154,7 +154,7 @@ class MiddlewareService:
                 except Exception:
                     continue
 
-        if not silent_user_notice and update.effective_message:
+        if send_user_notice and update.effective_message:
             await update.effective_message.reply_text(
                 "⏳ Your access request is pending admin approval.\nYou'll be notified once approved."
             )

@@ -51,6 +51,10 @@ class MemoryManager:
     def _chat_messages_path(self, user_id: int, chat_id: str) -> Path:
         return self._user_chat_dir(user_id) / f"{chat_id}.jsonl"
 
+    @staticmethod
+    def _generate_chat_id() -> str:
+        return f"chat_{uuid4().hex[:12]}"
+
     async def _read_json_file(self, path: Path, fallback: Any) -> Any:
         if not path.exists():
             return fallback
@@ -121,7 +125,7 @@ class MemoryManager:
             return index
 
         # one-time migration from legacy single-history file
-        chat_id = f"chat_{uuid4().hex[:12]}"
+        chat_id = self._generate_chat_id()
         now = utc_now_iso()
         title = "Imported Chat" if self._legacy_history_path(user_id).exists() else "New Chat"
         chat_entry = {"id": chat_id, "title": title, "created_at": now, "updated_at": now}
@@ -146,7 +150,7 @@ class MemoryManager:
             index = await self._load_index(user_id)
             chats = [chat for chat in index.get("chats", []) if isinstance(chat, dict)]
             index["chats"] = chats
-            chat_id = f"chat_{uuid4().hex[:12]}"
+            chat_id = self._generate_chat_id()
             now = utc_now_iso()
             entry = {"id": chat_id, "title": (title or "New Chat").strip()[:80], "created_at": now, "updated_at": now}
             index["chats"].insert(0, entry)
@@ -233,7 +237,7 @@ class MemoryManager:
             if messages_path.exists():
                 os.remove(messages_path)
             if not kept:
-                chat_id_new = f"chat_{uuid4().hex[:12]}"
+                chat_id_new = self._generate_chat_id()
                 now = utc_now_iso()
                 entry = {"id": chat_id_new, "title": "New Chat", "created_at": now, "updated_at": now}
                 kept = [entry]
@@ -287,7 +291,7 @@ class MemoryManager:
         async with aiofiles.open(path, "r", encoding="utf-8") as handle:
             lines = (await handle.read()).splitlines()
         entries: list[dict[str, Any]] = []
-        for line in lines[-max(1, limit) :]:
+        for line in lines[-max(1, limit):]:
             if not line.strip():
                 continue
             try:

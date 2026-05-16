@@ -45,7 +45,7 @@ from utils import (
 SESSION_PENDING_KEY = "pending_generation"
 SESSION_STATUS_KEY = "status_panel"
 SESSION_RENAME_CHAT_KEY = "pending_rename_chat_id"
-STATUS_EDIT_MIN_INTERVAL_SECONDS = 0.9
+STATUS_EDIT_MIN_INTERVAL_SECONDS = 1.2
 DEFAULT_STATUS_TEXT = "Idle and ready"
 
 
@@ -214,7 +214,7 @@ async def _upsert_status_message(
             return
         except BadRequest as exc:
             if "message is not modified" not in str(exc).lower():
-                pass
+                services.logger.warning("Status panel edit failed: %s", exc)
         except Exception:
             pass
 
@@ -633,6 +633,7 @@ async def _run_user_guarded(
     operation: Callable[[], Awaitable[None]],
     use_queue: bool = True,
 ) -> None:
+    """Run a user operation behind access checks and optional per-user queueing."""
     services = services_from_context(context)
     if not await services.middleware.ensure_user_allowed(update, context):
         return
@@ -862,7 +863,10 @@ async def fix_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def continue_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await _run_user_guarded(update, context, lambda: _run_generation_from_pending(update, context))
+    async def _impl() -> None:
+        await _run_generation_from_pending(update, context)
+
+    await _run_user_guarded(update, context, _impl)
 
 
 async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1008,8 +1012,8 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     data = query.data or ""
     try:
         await query.answer()
-    except Exception:
-        pass
+    except Exception as exc:
+        services.logger.warning("Failed to answer callback query: %s", exc)
 
     try:
         if data.startswith("admin:"):
@@ -1098,7 +1102,7 @@ def main() -> None:
     app.add_handler(CommandHandler("chats", chats_cmd))
     app.add_handler(CommandHandler("reset", reset))
     app.add_handler(CommandHandler("status", status))
-    app.add_handler(CallbackQueryHandler(callback_router))
+    app.add_handler(CallbackQueryHandler(callback_router, pattern=r"^(cmd|chat|admin):"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
 
     admin_handlers = AdminHandlers(root_dir, services.config, services.memory, services.files, services.middleware)
