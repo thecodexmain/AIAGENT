@@ -44,6 +44,40 @@ FILE_BLOCK_RE = re.compile(
     r"FILE:\s*(?P<path>[^\r\n]+)\r?\n```(?P<lang>[\w.+-]*)\r?\n(?P<content>[\s\S]*?)\r?\n```",
     re.MULTILINE,
 )
+PROMPT_ENHANCEMENT_MAX_CHARS = 2800
+PROMPT_ENHANCEMENT_SUFFIX = " ...[compressed]"
+PROMPT_ENHANCEMENT_FALLBACK_DEFAULT_COUNT = 6
+
+CONTEXT_TAG_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (
+        ("login", "signup", "auth", "account", "password"),
+        "secure authentication UX with robust validation and clear feedback",
+    ),
+    (
+        ("dashboard", "admin", "panel", "analytics"),
+        "data-dense dashboard layout with scalable navigation patterns",
+    ),
+    (
+        ("form", "submit", "input", "checkout", "payment"),
+        "high-conversion form UX with validation, helper text, and safe submission flows",
+    ),
+    (
+        ("api", "backend", "server", "database"),
+        "clean API contracts, error handling, and maintainable service architecture",
+    ),
+    (
+        ("landing", "marketing", "portfolio", "home page", "homepage"),
+        "premium visual storytelling with strong hierarchy and conversion-ready sections",
+    ),
+    (
+        ("fix", "bug", "error", "issue", "crash"),
+        "root-cause analysis, minimal-risk fixes, and regression-safe implementation",
+    ),
+    (
+        ("refactor", "cleanup", "improve", "optimize"),
+        "improved naming, structure, and performance with preserved behavior",
+    ),
+)
 
 
 class AIEngine:
@@ -137,20 +171,9 @@ class AIEngine:
     def _infer_context_tags(prompt: str) -> list[str]:
         lower = prompt.lower()
         tags: list[str] = []
-        if any(token in lower for token in ("login", "signup", "auth", "account", "password")):
-            tags.append("secure authentication UX with robust validation and clear feedback")
-        if any(token in lower for token in ("dashboard", "admin", "panel", "analytics")):
-            tags.append("data-dense dashboard layout with scalable navigation patterns")
-        if any(token in lower for token in ("form", "submit", "input", "checkout", "payment")):
-            tags.append("high-conversion form UX with validation, helper text, and safe submission flows")
-        if any(token in lower for token in ("api", "backend", "server", "database")):
-            tags.append("clean API contracts, error handling, and maintainable service architecture")
-        if any(token in lower for token in ("landing", "marketing", "portfolio", "home page", "homepage")):
-            tags.append("premium visual storytelling with strong hierarchy and conversion-ready sections")
-        if any(token in lower for token in ("fix", "bug", "error", "issue", "crash")):
-            tags.append("root-cause analysis, minimal-risk fixes, and regression-safe implementation")
-        if any(token in lower for token in ("refactor", "cleanup", "improve", "optimize")):
-            tags.append("improved naming, structure, and performance with preserved behavior")
+        for keywords, guidance in CONTEXT_TAG_RULES:
+            if any(token in lower for token in keywords):
+                tags.append(guidance)
         return tags
 
     def enhance_prompt(self, prompt: str, task_type: str = "build") -> PromptEnhancement:
@@ -179,9 +202,9 @@ class AIEngine:
             f"Execution focus: {task_focus}. "
             "Generate only required files, but ensure each file is polished, cohesive, and production-ready with no placeholders."
         )
-        max_chars = 2800
+        max_chars = PROMPT_ENHANCEMENT_MAX_CHARS
         if len(enhanced) > max_chars:
-            concise_defaults = "; ".join(self._premium_defaults[:6])
+            concise_defaults = "; ".join(self._premium_defaults[:PROMPT_ENHANCEMENT_FALLBACK_DEFAULT_COUNT])
             enhanced = (
                 f"User intent: {base_prompt}. Task mode: {task}. {quality_bar} "
                 f"Always include: {concise_defaults}. "
@@ -190,7 +213,8 @@ class AIEngine:
                 "Generate only required files with production-ready quality and no placeholders."
             )
         if len(enhanced) > max_chars:
-            enhanced = enhanced[: max_chars - 32].rstrip() + " ...[compressed]"
+            suffix_budget = len(PROMPT_ENHANCEMENT_SUFFIX)
+            enhanced = enhanced[: max_chars - suffix_budget].rstrip() + PROMPT_ENHANCEMENT_SUFFIX
         return PromptEnhancement(original_prompt=base_prompt, enhanced_prompt=enhanced)
 
     @retry(wait=wait_exponential(multiplier=1, min=1, max=8), stop=stop_after_attempt(3), reraise=True)

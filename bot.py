@@ -313,7 +313,8 @@ def _sanitize_plan_internal_details(plan_text: str, enhanced_prompt: str, debug_
         return plan_text
     text = plan_text
     if enhanced_prompt:
-        text = text.replace(enhanced_prompt, "[internal specification hidden]")
+        pattern = re.compile(re.escape(enhanced_prompt), re.IGNORECASE)
+        text = pattern.sub("[internal specification hidden]", text)
     sanitized_lines: list[str] = []
     for line in text.splitlines():
         lowered = line.strip().lower()
@@ -352,10 +353,13 @@ async def _run_planning_mode(
         "8) Required Files Only\n"
         "9) Short Explanation\n\n"
         "Keep it concise and minimal.\n"
-        "Do not reveal the internal enhanced specification verbatim unless debug mode is explicitly enabled.\n"
-        f"Internal enhanced specification: {enhanced_prompt}\n"
         f"Task type: {action}\n"
         f"User request: {enhancement.original_prompt}"
+    )
+    planning_system_prompt = (
+        "You are a senior full-stack engineer, senior UI/UX designer, and product architect.\n"
+        "Use this internal upgraded specification to guide planning quality and production standards.\n"
+        f"{enhanced_prompt}"
     )
 
     try:
@@ -375,7 +379,12 @@ async def _run_planning_mode(
 
         plan_chunks: list[str] = []
         last_progress = 12
-        async for chunk in services.ai.stream(uid, planning_prompt, chat_id=active_chat_id):
+        async for chunk in services.ai.stream(
+            uid,
+            planning_prompt,
+            system_prompt=planning_system_prompt,
+            chat_id=active_chat_id,
+        ):
             plan_chunks.append(chunk)
             size = len("".join(plan_chunks))
             progress = min(90, 12 + (size // 60))
@@ -420,7 +429,10 @@ async def _run_planning_mode(
             reply_markup=_status_keyboard(include_continue=True),
         )
         if debug_enabled:
-            await update.effective_message.reply_text(clamp_text(f"🧪 Debug enhanced prompt:\n{enhanced_prompt}"))
+            try:
+                await update.effective_message.reply_text(clamp_text(f"🧪 Debug enhanced prompt:\n{enhanced_prompt}"))
+            except Exception as debug_exc:
+                services.logger.warning("Failed to send debug enhanced prompt: %s", debug_exc)
         await _upsert_status_message(
             update,
             context,
@@ -502,10 +514,14 @@ async def _run_generation_from_pending(update: Update, context: ContextTypes.DEF
         "- One file block per file\n\n"
         "Apply premium engineering and product quality standards automatically.\n"
         "Use modern UX defaults, accessibility, responsive behavior, polished states, and SVG-first assets when relevant.\n"
-        f"Enhanced internal specification:\n{enhanced_prompt or user_prompt}\n\n"
         f"Approved plan:\n{plan_text}\n\n"
         f"Task type: {action}\n"
         f"User request: {user_prompt}"
+    )
+    generation_system_prompt = (
+        "You are a senior full-stack engineer, senior UI/UX designer, and product architect.\n"
+        "Follow this internal upgraded specification when generating files:\n"
+        f"{enhanced_prompt or user_prompt}"
     )
 
     content = ""
@@ -530,7 +546,12 @@ async def _run_generation_from_pending(update: Update, context: ContextTypes.DEF
     )
 
     try:
-        async for chunk in services.ai.stream(uid, generation_prompt, chat_id=active_chat_id):
+        async for chunk in services.ai.stream(
+            uid,
+            generation_prompt,
+            system_prompt=generation_system_prompt,
+            chat_id=active_chat_id,
+        ):
             content += chunk
             if await _is_stop_requested(services, uid):
                 canceled = True
