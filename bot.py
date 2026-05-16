@@ -313,8 +313,7 @@ def _sanitize_plan_internal_details(plan_text: str, enhanced_prompt: str, debug_
         return plan_text
     text = plan_text
     if enhanced_prompt:
-        pattern = re.compile(re.escape(enhanced_prompt), re.IGNORECASE)
-        text = pattern.sub("[internal specification hidden]", text)
+        text = text.replace(enhanced_prompt, "[internal specification hidden]")
     sanitized_lines: list[str] = []
     for line in text.splitlines():
         lowered = line.strip().lower()
@@ -354,7 +353,7 @@ async def _run_planning_mode(
         "9) Short Explanation\n\n"
         "Keep it concise and minimal.\n"
         f"Task type: {action}\n"
-        f"User request: {enhancement.original_prompt}"
+        f"User request: {user_prompt}"
     )
     planning_system_prompt = (
         "You are a senior full-stack engineer, senior UI/UX designer, and product architect.\n"
@@ -491,6 +490,8 @@ async def _run_generation_from_pending(update: Update, context: ContextTypes.DEF
     action = str(pending.get("action", "build"))
     user_prompt = str(pending.get("prompt", "")).strip()
     enhanced_prompt = normalize_whitespace(str(pending.get("enhanced_prompt", "")).strip())
+    if not enhanced_prompt:
+        enhanced_prompt = normalize_whitespace(services.ai.enhance_prompt(user_prompt, task_type=action).enhanced_prompt)
     plan_text = str(pending.get("plan", "")).strip()
     expected_files = pending.get("expected_files")
     if not isinstance(expected_files, list):

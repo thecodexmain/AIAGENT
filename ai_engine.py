@@ -191,7 +191,7 @@ class AIEngine:
             "Fill missing requirements intelligently, remove ambiguity, and avoid basic template-level output."
         )
         premium_defaults = "; ".join(self._premium_defaults)
-        inferred_text = "; ".join(inferred) if inferred else "context-aware architecture and UX enhancements inferred from intent"
+        inferred_text = "; ".join(inferred) if inferred else "general production-grade best practices"
 
         enhanced = (
             f"User intent: {base_prompt}. "
@@ -204,7 +204,8 @@ class AIEngine:
         )
         max_chars = PROMPT_ENHANCEMENT_MAX_CHARS
         if len(enhanced) > max_chars:
-            concise_defaults = "; ".join(self._premium_defaults[:PROMPT_ENHANCEMENT_FALLBACK_DEFAULT_COUNT])
+            fallback_default_count = min(len(self._premium_defaults), PROMPT_ENHANCEMENT_FALLBACK_DEFAULT_COUNT)
+            concise_defaults = "; ".join(self._premium_defaults[:fallback_default_count])
             enhanced = (
                 f"User intent: {base_prompt}. Task mode: {task}. {quality_bar} "
                 f"Always include: {concise_defaults}. "
